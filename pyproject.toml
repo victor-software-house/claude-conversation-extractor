@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-conversation-extractor"
-version = "2.0.0"
+version = "2.1.0"
 description = "Non-interactive CLI tool for searching and exporting Claude Code conversations. Designed for scripting and Claude Code plugin integration."
 readme = "README.md"
 authors = [

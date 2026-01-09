@@ -9,10 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 - Unified CLI with subcommands (`search`, `list`, `export`, `view`)
-- `--last` flag for quick access to current/most recent session
 - Fuzzy matching for improved search relevance
 - CSV output format
 - Comprehensive test suite
+
+---
+
+## [2.1.0] - 2026-01-09
+
+### Added
+- **`--last` flag** (`-L`) - Export the last N sessions for current project
+  - `claude-search --last` - Export last session as markdown to stdout
+  - `claude-search --last 3` - Export last 3 sessions
+  - `claude-search --last --format json` - Export as JSON
+  - `claude-search --last --format html -o file.html` - Export as HTML to file
+  - `claude-search --last --detailed` - Include tool use, MCP, system messages
+  - `claude-search --last --global` - Last session across all projects
+- **`--format` flag** (`-f`) - Choose output format (markdown, json, html)
+- **`--output` flag** (`-o`) - Save to file instead of stdout
+- **`--detailed` flag** (`-d`) - Include tool use and system messages in export
+- Helper functions for project session detection (`encode_project_path`, `find_project_sessions_dir`, `get_last_sessions`)
 
 ---
 
@@ -119,7 +135,8 @@ This is a fork of [ZeroSumQuant/claude-conversation-extractor](https://github.co
 
 ---
 
-[Unreleased]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v1.1.2...v2.0.0
 [1.1.2]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/victor-software-house/claude-conversation-extractor/compare/v1.1.0...v1.1.1

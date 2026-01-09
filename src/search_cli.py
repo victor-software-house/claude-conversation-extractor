@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
 """
-Non-interactive CLI search for Claude conversations.
+Non-interactive CLI for Claude conversations - search, list, and export.
 
 Designed for scripting and integration with tools like Claude Code plugins.
 All output goes to stdout with proper exit codes for automation.
 
 Exit codes:
-    0 - Success (matches found)
-    1 - No matches found
+    0 - Success (matches found / export successful)
+    1 - No matches found / no sessions
     2 - Error (invalid arguments, file not found, etc.)
 """
 
 import argparse
+import io
 import json
+import os
 import sys
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Handle both package and direct execution imports
 try:
     from .search_conversations import ConversationSearcher, SearchResult
+    from .extract_claude_logs import ClaudeConversationExtractor
 except ImportError:
     from search_conversations import ConversationSearcher, SearchResult
+    from extract_claude_logs import ClaudeConversationExtractor
 
 
 def format_text_output(
@@ -105,6 +110,237 @@ def parse_date(date_str: str) -> Optional[datetime]:
     return None
 
 
+def encode_project_path(path: str) -> str:
+    """Encode a path the way Claude Code does for project directories.
+
+    Claude Code encodes paths by replacing '/' with '-' and prepending '-'.
+    Example: /Users/foo/project -> -Users-foo-project
+    """
+    # Normalize path (resolve symlinks, remove trailing slashes)
+    normalized = os.path.realpath(path).rstrip('/')
+    # Replace / with - and prepend -
+    return normalized.replace('/', '-')
+
+
+def find_project_sessions_dir(cwd: Optional[str] = None) -> Optional[Path]:
+    """Find the Claude sessions directory for the current or specified project.
+
+    Args:
+        cwd: Working directory to find sessions for (default: current directory)
+
+    Returns:
+        Path to the sessions directory, or None if not found
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+
+    encoded = encode_project_path(cwd)
+    sessions_dir = Path.home() / ".claude" / "projects" / encoded
+
+    if sessions_dir.exists() and sessions_dir.is_dir():
+        return sessions_dir
+
+    return None
+
+
+def get_last_sessions(
+    n: int = 1,
+    cwd: Optional[str] = None,
+    global_search: bool = False,
+) -> List[Path]:
+    """Get the N most recent sessions for the current project (or globally).
+
+    Args:
+        n: Number of sessions to return
+        cwd: Working directory to find sessions for (default: current directory)
+        global_search: If True, search all projects, not just current
+
+    Returns:
+        List of session Paths sorted by modification time (most recent first)
+    """
+    claude_projects_dir = Path.home() / ".claude" / "projects"
+
+    if not claude_projects_dir.exists():
+        return []
+
+    sessions = []
+
+    if global_search:
+        # Search all projects
+        for jsonl_file in claude_projects_dir.rglob("*.jsonl"):
+            sessions.append(jsonl_file)
+    else:
+        # Search current project only
+        sessions_dir = find_project_sessions_dir(cwd)
+        if sessions_dir is None:
+            return []
+
+        for jsonl_file in sessions_dir.glob("*.jsonl"):
+            sessions.append(jsonl_file)
+
+    # Sort by modification time (most recent first)
+    sessions.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
+    return sessions[:n]
+
+
+def format_conversation_markdown(
+    conversation: List[Dict[str, Any]],
+    session_id: str,
+) -> str:
+    """Format a conversation as markdown string for stdout output."""
+    lines = []
+
+    # Get timestamp from first message
+    first_timestamp = conversation[0].get("timestamp", "") if conversation else ""
+    if first_timestamp:
+        try:
+            dt = datetime.fromisoformat(first_timestamp.replace("Z", "+00:00"))
+            date_str = dt.strftime("%Y-%m-%d")
+            time_str = dt.strftime("%H:%M:%S")
+        except Exception:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            time_str = ""
+    else:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        time_str = ""
+
+    lines.append("# Claude Conversation Log\n")
+    lines.append(f"Session ID: {session_id}")
+    lines.append(f"Date: {date_str}" + (f" {time_str}" if time_str else ""))
+    lines.append("\n---\n")
+
+    for msg in conversation:
+        role = msg["role"]
+        content = msg["content"]
+
+        if role == "user":
+            lines.append("## 👤 User\n")
+        elif role == "assistant":
+            lines.append("## 🤖 Claude\n")
+        elif role == "tool_use":
+            lines.append("### 🔧 Tool Use\n")
+        elif role == "tool_result":
+            lines.append("### 📤 Tool Result\n")
+        elif role == "system":
+            lines.append("### ℹ️ System\n")
+        else:
+            lines.append(f"## {role}\n")
+
+        lines.append(f"{content}\n")
+        lines.append("---\n")
+
+    return "\n".join(lines)
+
+
+def format_conversation_json(
+    conversation: List[Dict[str, Any]],
+    session_id: str,
+) -> str:
+    """Format a conversation as JSON string for stdout output."""
+    first_timestamp = conversation[0].get("timestamp", "") if conversation else ""
+    if first_timestamp:
+        try:
+            dt = datetime.fromisoformat(first_timestamp.replace("Z", "+00:00"))
+            date_str = dt.strftime("%Y-%m-%d")
+        except Exception:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    output = {
+        "session_id": session_id,
+        "date": date_str,
+        "message_count": len(conversation),
+        "messages": conversation
+    }
+
+    return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+def handle_last_sessions(args) -> int:
+    """Handle --last flag: export last N sessions for current project.
+
+    Args:
+        args: Parsed command line arguments
+
+    Returns:
+        Exit code (0=success, 1=no sessions, 2=error)
+    """
+    n = args.last
+    global_search = getattr(args, 'global_search', False)
+
+    # Get last N sessions
+    sessions = get_last_sessions(n=n, global_search=global_search)
+
+    if not sessions:
+        if not args.quiet:
+            if global_search:
+                print("No Claude sessions found.", file=sys.stderr)
+            else:
+                cwd = os.getcwd()
+                print(f"No Claude sessions found for project: {cwd}", file=sys.stderr)
+                print("Use --global to search all projects.", file=sys.stderr)
+        return 1
+
+    # Initialize extractor (suppress the "Saving logs to:" message)
+    with redirect_stdout(io.StringIO()):
+        extractor = ClaudeConversationExtractor(output_dir="/tmp")
+
+    # Process each session
+    all_outputs = []
+    for session_path in sessions:
+        session_id = session_path.stem
+        conversation = extractor.extract_conversation(
+            session_path,
+            detailed=args.detailed
+        )
+
+        if not conversation:
+            if not args.quiet:
+                print(f"Warning: No content in session {session_id[:8]}", file=sys.stderr)
+            continue
+
+        # Format based on output format
+        if args.format == "json":
+            output = format_conversation_json(conversation, session_id)
+        elif args.format == "html":
+            # For HTML, save to file (not suitable for stdout concatenation)
+            if args.output:
+                output_path = extractor.save_as_html(conversation, session_id)
+                if output_path and not args.quiet:
+                    print(f"Saved: {output_path}", file=sys.stderr)
+                continue
+            else:
+                # Fall back to markdown for stdout
+                output = format_conversation_markdown(conversation, session_id)
+        else:  # markdown
+            output = format_conversation_markdown(conversation, session_id)
+
+        all_outputs.append(output)
+
+    if not all_outputs:
+        if not args.quiet:
+            print("No conversation content found.", file=sys.stderr)
+        return 1
+
+    # Combine outputs
+    combined_output = "\n\n".join(all_outputs)
+
+    # Output to file or stdout
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(combined_output)
+        if not args.quiet:
+            print(f"Saved: {output_path}", file=sys.stderr)
+    else:
+        print(combined_output)
+
+    return 0
+
+
 def main() -> int:
     """Main entry point for CLI search."""
     parser = argparse.ArgumentParser(
@@ -119,9 +355,16 @@ Examples:
   %(prog)s "api" --json --quiet         # JSON output, no decorations
   %(prog)s "test" --limit 5 --context 500   # Customize output
 
+  %(prog)s --last                       # Export last session as markdown
+  %(prog)s --last 3                     # Export last 3 sessions
+  %(prog)s --last --format json         # Export as JSON
+  %(prog)s --last -o output.md          # Save to file
+  %(prog)s --last --detailed            # Include tool use & system msgs
+  %(prog)s --last --global              # Last session across all projects
+
 Exit codes:
-  0 - Matches found
-  1 - No matches found
+  0 - Matches found / export successful
+  1 - No matches found / no sessions
   2 - Error
         """,
     )
@@ -214,6 +457,32 @@ Exit codes:
         help="Display absolute timestamps (default)",
     )
 
+    # Last session export
+    parser.add_argument(
+        "--last", "-L",
+        nargs="?",
+        const=1,
+        type=int,
+        metavar="N",
+        help="Export the last N sessions for current project (default: 1)",
+    )
+    parser.add_argument(
+        "--format", "-f",
+        choices=["markdown", "json", "html"],
+        default="markdown",
+        help="Output format for --last export (default: markdown)",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        help="Output file path for --last (default: stdout)",
+    )
+    parser.add_argument(
+        "--detailed", "-d",
+        action="store_true",
+        help="Include tool use, MCP responses, and system messages in --last export",
+    )
+
     # Limits
     parser.add_argument(
         "--limit", "-l",
@@ -241,6 +510,10 @@ Exit codes:
     )
 
     args = parser.parse_args()
+
+    # Handle --last flag (export last N sessions)
+    if args.last is not None:
+        return handle_last_sessions(args)
 
     # Determine search query and mode
     if args.pattern:

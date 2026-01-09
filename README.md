@@ -78,6 +78,8 @@ Interactive UI with ASCII art and real-time search.
 
 ## JSON Output Schema
 
+### Search Results
+
 ```json
 {
   "query": "search term",
@@ -103,11 +105,108 @@ Interactive UI with ASCII art and real-time search.
 }
 ```
 
+## JSONL Schema Reference
+
+Claude Code stores sessions as JSONL files in `~/.claude/projects/-{encoded-path}/`.
+
+### Entry Types
+
+| Type | Subtype | Parsed | Description |
+|------|---------|--------|-------------|
+| `user` | - | ✅ | User messages + tool results |
+| `assistant` | - | ✅ | Claude responses + tool use |
+| `system` | `stop_hook_summary` | ⚠️ partial | Hook execution results |
+| `system` | `turn_duration` | ❌ | Performance metrics |
+| `system` | `api_error` | ❌ | API errors |
+| `system` | `local_command` | ❌ | Local commands (/clear, etc.) |
+| `system` | `compact_boundary` | ❌ | Context compaction markers |
+| `file-history-snapshot` | - | ❌ | File state snapshots |
+| `queue-operation` | - | ❌ | Operation queue entries |
+| `summary` | - | ❌ | Conversation summaries |
+| `custom-title` | - | ❌ | User-set session titles |
+
+### Entry Structure
+
+Common fields across all entries:
+```json
+{
+  "type": "user|assistant|system|...",
+  "subtype": "optional subtype",
+  "uuid": "entry-unique-id",
+  "parentUuid": "parent-entry-id",
+  "sessionId": "session-uuid",
+  "timestamp": "ISO8601",
+  "cwd": "/project/path",
+  "gitBranch": "branch-name",
+  "version": "claude-code-version"
+}
+```
+
+### Message Content Types
+
+Within `user` and `assistant` entries, `message.content` is an array:
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "..."},
+      {"type": "tool_result", "tool_use_id": "...", "content": "..."},
+      {"type": "tool_use", "id": "...", "name": "Bash", "input": {...}}
+    ]
+  }
+}
+```
+
+### Hook Summary Structure
+
+```json
+{
+  "type": "system",
+  "subtype": "stop_hook_summary",
+  "hookCount": 1,
+  "hookInfos": [{"command": "python3 hooks/stop.py"}],
+  "hookErrors": [],
+  "preventedContinuation": false,
+  "hasOutput": true,
+  "level": "suggestion"
+}
+```
+
+### Session DAG Structure
+
+Sessions form a DAG (Directed Acyclic Graph) via `parentUuid`:
+- Each entry has `uuid` (self) and `parentUuid` (parent)
+- Root entries have `parentUuid` pointing to previous turn
+- Enables branching conversations and context tracking
+
+## Pagination & Context
+
+### Current Limitations
+
+1. **Search returns snippets only** - no surrounding messages
+2. **No message-level pagination** - full session or nothing
+3. **Line numbers don't map to message indices**
+
+### Workaround: Export + grep
+
+```bash
+# Export session, then grep with context
+claude-search --last --format json | jq -r '.messages[].content' | grep -B5 -A5 "pattern"
+```
+
 ## Session Storage
 
-Claude Code stores sessions in: `~/.claude/projects/-{encoded-path}/`
-
 Path encoding: `/Users/foo/project` → `-Users-foo-project`
+
+```
+~/.claude/
+└── projects/
+    └── -Users-foo-project/
+        ├── abc123-uuid.jsonl    # Session file
+        └── def456-uuid.jsonl    # Another session
+```
 
 ## Development
 

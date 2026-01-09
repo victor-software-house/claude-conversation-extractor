@@ -7,51 +7,100 @@ This module provides powerful search capabilities including:
 - Regex pattern matching
 - Date range filtering
 - Speaker filtering (Human/Assistant)
-- Semantic search using NLP
+- Project/directory filtering
+- Git branch filtering
 
-Adapted from CAKE's conversation parser for Claude conversation search.
+Designed for non-interactive CLI usage with JSON output support.
 """
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set
-
-# Optional NLP imports for semantic search
-try:
-    import spacy
-
-    SPACY_AVAILABLE = True
-except ImportError:
-    SPACY_AVAILABLE = False
-    print("Note: Install spacy for enhanced semantic search capabilities")
-    print("      pip install spacy && python -m spacy download en_core_web_sm")
+from typing import Dict, List, Optional, Set, Any
 
 
 @dataclass
 class SearchResult:
-    """Represents a search result with context"""
+    """Represents a search result with context and metadata."""
 
     file_path: Path
-    conversation_id: str
+    session_id: str
     matched_content: str
-    context: str  # Surrounding text for context
+    context: str
     speaker: str  # 'human' or 'assistant'
     timestamp: Optional[datetime] = None
     relevance_score: float = 0.0
     line_number: int = 0
+    # New fields for filtering
+    cwd: Optional[str] = None
+    git_branch: Optional[str] = None
+    project_name: Optional[str] = None
 
-    def __str__(self) -> str:
-        """User-friendly string representation"""
+    def to_dict(self, relative_time: bool = False) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "session_id": self.session_id,
+            "project": self.project_name or self._extract_project_name(),
+            "cwd": self.cwd,
+            "git_branch": self.git_branch,
+            "speaker": self.speaker,
+            "relevance": round(self.relevance_score, 3),
+            "snippet": self.context,
+            "line_number": self.line_number,
+        }
+
+        if self.timestamp:
+            if relative_time:
+                result["timestamp"] = self._relative_time()
+            else:
+                result["timestamp"] = self.timestamp.isoformat()
+
+        return result
+
+    def _extract_project_name(self) -> str:
+        """Extract project name from file path."""
+        if self.cwd:
+            return Path(self.cwd).name
+        # Fallback to parent directory name
+        return self.file_path.parent.name.replace('-', '/').split('/')[-1]
+
+    def _relative_time(self) -> str:
+        """Format timestamp as relative time."""
+        if not self.timestamp:
+            return "unknown"
+
+        now = datetime.now(self.timestamp.tzinfo) if self.timestamp.tzinfo else datetime.now()
+        diff = now - self.timestamp
+
+        if diff.days > 365:
+            years = diff.days // 365
+            return f"{years} year{'s' if years > 1 else ''} ago"
+        elif diff.days > 30:
+            months = diff.days // 30
+            return f"{months} month{'s' if months > 1 else ''} ago"
+        elif diff.days > 0:
+            return f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
+        elif diff.seconds > 3600:
+            hours = diff.seconds // 3600
+            return f"{hours} hour{'s' if hours > 1 else ''} ago"
+        elif diff.seconds > 60:
+            minutes = diff.seconds // 60
+            return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+        else:
+            return "just now"
+
+    def format_text(self, relative_time: bool = False) -> str:
+        """Format as human-readable text."""
+        time_str = self._relative_time() if relative_time else (
+            self.timestamp.strftime("%Y-%m-%d %H:%M") if self.timestamp else "unknown"
+        )
+        project = self.project_name or self._extract_project_name()
+
         return (
-            f"\n{'=' * 60}\n"
-            f"File: {self.file_path.name}\n"
-            f"Speaker: {self.speaker.title()}\n"
-            f"Relevance: {self.relevance_score:.0%}\n"
-            f"{'=' * 60}\n"
-            f"{self.context}\n"
+            f"[{time_str}] {project} ({self.speaker})\n"
+            f"  {self.context[:200]}{'...' if len(self.context) > 200 else ''}"
         )
 
 
@@ -59,70 +108,26 @@ class ConversationSearcher:
     """
     Main search engine for Claude conversations.
 
-    Provides multiple search modes and intelligent ranking.
+    Provides multiple search modes and filtering capabilities.
+    All methods are non-interactive and suitable for scripting.
     """
 
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, quiet: bool = False):
         """
         Initialize the searcher.
 
         Args:
-            cache_dir: Optional directory for caching processed conversations
+            quiet: If True, suppress all non-essential output
         """
-        self.cache_dir = cache_dir or Path.home() / ".claude" / ".search_cache"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize NLP if available
-        self.nlp = None
-        if SPACY_AVAILABLE:
-            try:
-                self.nlp = spacy.load("en_core_web_sm")
-                # Disable unnecessary components for speed
-                self.nlp.select_pipes(disable=["ner", "lemmatizer"])
-            except Exception:
-                print("Warning: spaCy model not found. Using basic search.")
+        self.quiet = quiet
 
         # Common words to ignore in relevance scoring
         self.stop_words = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "is",
-            "are",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "i",
-            "you",
-            "we",
-            "they",
-            "it",
-            "this",
-            "that",
-            "these",
-            "those",
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
+            "for", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "i", "you", "we", "they",
+            "it", "this", "that", "these", "those",
         }
 
     def search(
@@ -133,32 +138,45 @@ class ConversationSearcher:
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
         speaker_filter: Optional[str] = None,
-        max_results: int = 20,
+        max_results: int = 10,
         case_sensitive: bool = False,
+        context_size: int = 300,
+        # New filter options
+        session_id: Optional[str] = None,
+        project_filter: Optional[str] = None,
+        branch_filter: Optional[str] = None,
+        include_tools: bool = False,
+        global_search: bool = False,
     ) -> List[SearchResult]:
         """
         Search conversations with various filters.
 
         Args:
-            query: Search query (text or regex pattern)
+            query: Search query (text or regex pattern if mode="regex")
             search_dir: Directory to search in (default: ~/.claude/projects)
-            mode: Search mode - "smart", "exact", "regex", "semantic"
+            mode: Search mode - "smart", "exact", "regex"
             date_from: Filter results from this date
             date_to: Filter results until this date
-            speaker_filter: Filter by speaker - "human", "assistant", or None for both
+            speaker_filter: Filter by speaker - "human", "assistant", or None
             max_results: Maximum number of results to return
             case_sensitive: Whether search should be case-sensitive
+            context_size: Number of characters for context snippets
+            session_id: Filter by specific session ID
+            project_filter: Filter by project name or path (matches cwd)
+            branch_filter: Filter by git branch name
+            include_tools: Include tool use messages in results
+            global_search: Search all projects (ignore search_dir)
 
         Returns:
             List of SearchResult objects sorted by relevance
         """
         # Default search directory
-        if search_dir is None:
+        if search_dir is None or global_search:
             search_dir = Path.home() / ".claude" / "projects"
 
         # Validate search directory
         if not search_dir.exists():
-            raise ValueError(f"Search directory does not exist: {search_dir}")
+            return []
 
         # Return empty results for empty query
         if not query or not query.strip():
@@ -168,6 +186,10 @@ class ConversationSearcher:
         jsonl_files = list(search_dir.rglob("*.jsonl"))
         if not jsonl_files:
             return []
+
+        # Filter by session ID if provided
+        if session_id:
+            jsonl_files = [f for f in jsonl_files if session_id in f.stem]
 
         # Apply date filtering to files if provided
         if date_from or date_to:
@@ -179,17 +201,18 @@ class ConversationSearcher:
         for jsonl_file in jsonl_files:
             if mode == "regex":
                 results = self._search_regex(
-                    jsonl_file, query, speaker_filter, case_sensitive
+                    jsonl_file, query, speaker_filter, case_sensitive,
+                    context_size, project_filter, branch_filter, include_tools
                 )
             elif mode == "exact":
                 results = self._search_exact(
-                    jsonl_file, query, speaker_filter, case_sensitive
+                    jsonl_file, query, speaker_filter, case_sensitive,
+                    context_size, project_filter, branch_filter, include_tools
                 )
-            elif mode == "semantic" and self.nlp:
-                results = self._search_semantic(jsonl_file, query, speaker_filter)
-            else:  # smart mode - combines multiple approaches
+            else:  # smart mode
                 results = self._search_smart(
-                    jsonl_file, query, speaker_filter, case_sensitive
+                    jsonl_file, query, speaker_filter, case_sensitive,
+                    context_size, project_filter, branch_filter, include_tools
                 )
 
             all_results.extend(results)
@@ -221,20 +244,39 @@ class ConversationSearcher:
 
         return filtered
 
+    def _matches_filters(
+        self,
+        entry: Dict,
+        project_filter: Optional[str],
+        branch_filter: Optional[str],
+    ) -> bool:
+        """Check if entry matches project and branch filters."""
+        if project_filter:
+            cwd = entry.get("cwd", "")
+            if project_filter.lower() not in cwd.lower():
+                return False
+
+        if branch_filter:
+            git_branch = entry.get("gitBranch", "")
+            if branch_filter.lower() != git_branch.lower():
+                return False
+
+        return True
+
     def _search_smart(
         self,
         jsonl_file: Path,
         query: str,
         speaker_filter: Optional[str],
         case_sensitive: bool,
+        context_size: int,
+        project_filter: Optional[str],
+        branch_filter: Optional[str],
+        include_tools: bool,
     ) -> List[SearchResult]:
-        """
-        Smart search that combines multiple techniques.
-
-        Uses exact matching, fuzzy matching, and semantic similarity.
-        """
+        """Smart search that combines multiple techniques."""
         results = []
-        conversation_id = jsonl_file.stem
+        session_id = jsonl_file.stem
 
         # Process query
         if not case_sensitive:
@@ -243,7 +285,6 @@ class ConversationSearcher:
         else:
             query_tokens = set(query.split()) - self.stop_words
 
-        # Read and parse JSONL
         try:
             with open(jsonl_file, "r", encoding="utf-8") as f:
                 line_num = 0
@@ -252,60 +293,62 @@ class ConversationSearcher:
                     try:
                         entry = json.loads(line.strip())
 
-                        # Extract message based on entry type
-                        if entry.get("type") in ["user", "assistant"]:
-                            speaker = (
-                                "human" if entry["type"] == "user" else "assistant"
+                        # Check filters first
+                        if not self._matches_filters(entry, project_filter, branch_filter):
+                            continue
+
+                        # Determine message type
+                        entry_type = entry.get("type")
+                        if entry_type == "user":
+                            speaker = "human"
+                        elif entry_type == "assistant":
+                            speaker = "assistant"
+                        elif include_tools and entry_type in ("tool_use", "tool_result"):
+                            speaker = "tool"
+                        else:
+                            continue
+
+                        # Apply speaker filter
+                        if speaker_filter and speaker != speaker_filter:
+                            continue
+
+                        # Extract content
+                        content = self._extract_content(entry)
+                        if not content:
+                            continue
+
+                        # Calculate relevance
+                        relevance = self._calculate_relevance(
+                            content, query, query_tokens, case_sensitive
+                        )
+
+                        if relevance > 0.1:  # Threshold for inclusion
+                            context = self._extract_context(
+                                content, query, case_sensitive, context_size
                             )
 
-                            # Apply speaker filter
-                            if speaker_filter and speaker != speaker_filter:
-                                continue
+                            # Parse timestamp
+                            timestamp = self._parse_timestamp(entry.get("timestamp"))
 
-                            # Extract content
-                            content = self._extract_content(entry)
-                            if not content:
-                                continue
-
-                            # Calculate relevance
-                            relevance = self._calculate_relevance(
-                                content, query, query_tokens, case_sensitive
+                            result = SearchResult(
+                                file_path=jsonl_file,
+                                session_id=session_id,
+                                matched_content=content[:200],
+                                context=context,
+                                speaker=speaker,
+                                timestamp=timestamp,
+                                relevance_score=relevance,
+                                line_number=line_num,
+                                cwd=entry.get("cwd"),
+                                git_branch=entry.get("gitBranch"),
                             )
-
-                            if relevance > 0.1:  # Threshold for inclusion
-                                # Extract context
-                                context = self._extract_context(
-                                    content, query, case_sensitive
-                                )
-
-                                # Parse timestamp if present
-                                timestamp = None
-                                timestamp_str = entry.get("timestamp")
-                                if timestamp_str:
-                                    try:
-                                        timestamp = datetime.fromisoformat(
-                                            timestamp_str.replace("Z", "+00:00")
-                                        )
-                                    except ValueError:
-                                        pass
-
-                                result = SearchResult(
-                                    file_path=jsonl_file,
-                                    conversation_id=conversation_id,
-                                    matched_content=content[:200],
-                                    context=context,
-                                    speaker=speaker,
-                                    timestamp=timestamp,
-                                    relevance_score=relevance,
-                                    line_number=line_num,
-                                )
-                                results.append(result)
+                            results.append(result)
 
                     except json.JSONDecodeError:
                         continue
 
-        except Exception as e:
-            print(f"Error searching {jsonl_file}: {e}")
+        except Exception:
+            pass  # Silently skip problematic files
 
         return results
 
@@ -315,11 +358,14 @@ class ConversationSearcher:
         query: str,
         speaker_filter: Optional[str],
         case_sensitive: bool,
+        context_size: int,
+        project_filter: Optional[str],
+        branch_filter: Optional[str],
+        include_tools: bool,
     ) -> List[SearchResult]:
         """Exact string matching search."""
         results = []
-        conversation_id = jsonl_file.stem
-
+        session_id = jsonl_file.stem
         search_query = query if case_sensitive else query.lower()
 
         try:
@@ -330,59 +376,55 @@ class ConversationSearcher:
                     try:
                         entry = json.loads(line.strip())
 
-                        if entry.get("type") in ["user", "assistant"]:
-                            speaker = (
-                                "human" if entry["type"] == "user" else "assistant"
+                        if not self._matches_filters(entry, project_filter, branch_filter):
+                            continue
+
+                        entry_type = entry.get("type")
+                        if entry_type == "user":
+                            speaker = "human"
+                        elif entry_type == "assistant":
+                            speaker = "assistant"
+                        elif include_tools and entry_type in ("tool_use", "tool_result"):
+                            speaker = "tool"
+                        else:
+                            continue
+
+                        if speaker_filter and speaker != speaker_filter:
+                            continue
+
+                        content = self._extract_content(entry)
+                        if not content:
+                            continue
+
+                        search_content = content if case_sensitive else content.lower()
+
+                        if search_query in search_content:
+                            match_count = search_content.count(search_query)
+                            relevance = min(1.0, match_count * 0.2)
+                            context = self._extract_context(
+                                content, query, case_sensitive, context_size
                             )
+                            timestamp = self._parse_timestamp(entry.get("timestamp"))
 
-                            if speaker_filter and speaker != speaker_filter:
-                                continue
-
-                            content = self._extract_content(entry)
-                            if not content:
-                                continue
-
-                            search_content = (
-                                content if case_sensitive else content.lower()
+                            result = SearchResult(
+                                file_path=jsonl_file,
+                                session_id=session_id,
+                                matched_content=content[:200],
+                                context=context,
+                                speaker=speaker,
+                                timestamp=timestamp,
+                                relevance_score=relevance,
+                                line_number=line_num,
+                                cwd=entry.get("cwd"),
+                                git_branch=entry.get("gitBranch"),
                             )
-
-                            if search_query in search_content:
-                                # Calculate relevance based on match frequency
-                                match_count = search_content.count(search_query)
-                                relevance = min(1.0, match_count * 0.2)
-
-                                context = self._extract_context(
-                                    content, query, case_sensitive
-                                )
-
-                                # Parse timestamp if present
-                                timestamp = None
-                                timestamp_str = entry.get("timestamp")
-                                if timestamp_str:
-                                    try:
-                                        timestamp = datetime.fromisoformat(
-                                            timestamp_str.replace("Z", "+00:00")
-                                        )
-                                    except ValueError:
-                                        pass
-
-                                result = SearchResult(
-                                    file_path=jsonl_file,
-                                    conversation_id=conversation_id,
-                                    matched_content=content[:200],
-                                    context=context,
-                                    speaker=speaker,
-                                    timestamp=timestamp,
-                                    relevance_score=relevance,
-                                    line_number=line_num,
-                                )
-                                results.append(result)
+                            results.append(result)
 
                     except json.JSONDecodeError:
                         continue
 
-        except Exception as e:
-            print(f"Error searching {jsonl_file}: {e}")
+        except Exception:
+            pass
 
         return results
 
@@ -392,18 +434,20 @@ class ConversationSearcher:
         pattern: str,
         speaker_filter: Optional[str],
         case_sensitive: bool,
+        context_size: int,
+        project_filter: Optional[str],
+        branch_filter: Optional[str],
+        include_tools: bool,
     ) -> List[SearchResult]:
         """Regex pattern matching search."""
         results = []
-        conversation_id = jsonl_file.stem
+        session_id = jsonl_file.stem
 
-        # Compile regex pattern
         try:
             flags = 0 if case_sensitive else re.IGNORECASE
             regex = re.compile(pattern, flags)
-        except re.error as e:
-            print(f"Invalid regex pattern: {e}")
-            return []
+        except re.error:
+            return []  # Invalid regex
 
         try:
             with open(jsonl_file, "r", encoding="utf-8") as f:
@@ -413,160 +457,73 @@ class ConversationSearcher:
                     try:
                         entry = json.loads(line.strip())
 
-                        if entry.get("type") in ["user", "assistant"]:
-                            speaker = (
-                                "human" if entry["type"] == "user" else "assistant"
+                        if not self._matches_filters(entry, project_filter, branch_filter):
+                            continue
+
+                        entry_type = entry.get("type")
+                        if entry_type == "user":
+                            speaker = "human"
+                        elif entry_type == "assistant":
+                            speaker = "assistant"
+                        elif include_tools and entry_type in ("tool_use", "tool_result"):
+                            speaker = "tool"
+                        else:
+                            continue
+
+                        if speaker_filter and speaker != speaker_filter:
+                            continue
+
+                        content = self._extract_content(entry)
+                        if not content:
+                            continue
+
+                        matches = list(regex.finditer(content))
+
+                        if matches:
+                            relevance = min(1.0, len(matches) * 0.2)
+
+                            # Get context around first match
+                            first_match = matches[0]
+                            start = max(0, first_match.start() - context_size // 2)
+                            end = min(len(content), first_match.end() + context_size // 2)
+                            context = content[start:end]
+                            if start > 0:
+                                context = "..." + context
+                            if end < len(content):
+                                context = context + "..."
+
+                            timestamp = self._parse_timestamp(entry.get("timestamp"))
+
+                            result = SearchResult(
+                                file_path=jsonl_file,
+                                session_id=session_id,
+                                matched_content=first_match.group(),
+                                context=context,
+                                speaker=speaker,
+                                timestamp=timestamp,
+                                relevance_score=relevance,
+                                line_number=line_num,
+                                cwd=entry.get("cwd"),
+                                git_branch=entry.get("gitBranch"),
                             )
-
-                            if speaker_filter and speaker != speaker_filter:
-                                continue
-
-                            content = self._extract_content(entry)
-                            if not content:
-                                continue
-
-                            matches = list(regex.finditer(content))
-
-                            if matches:
-                                # Calculate relevance based on match quality
-                                relevance = min(1.0, len(matches) * 0.2)
-
-                                # Get context around first match
-                                first_match = matches[0]
-                                start = max(0, first_match.start() - 100)
-                                end = min(len(content), first_match.end() + 100)
-                                context = "..." + content[start:end] + "..."
-
-                                # Parse timestamp if present
-                                timestamp = None
-                                timestamp_str = entry.get("timestamp")
-                                if timestamp_str:
-                                    try:
-                                        timestamp = datetime.fromisoformat(
-                                            timestamp_str.replace("Z", "+00:00")
-                                        )
-                                    except ValueError:
-                                        pass
-
-                                result = SearchResult(
-                                    file_path=jsonl_file,
-                                    conversation_id=conversation_id,
-                                    matched_content=first_match.group(),
-                                    context=context,
-                                    speaker=speaker,
-                                    timestamp=timestamp,
-                                    relevance_score=relevance,
-                                    line_number=line_num,
-                                )
-                                results.append(result)
+                            results.append(result)
 
                     except json.JSONDecodeError:
                         continue
 
-        except Exception as e:
-            print(f"Error searching {jsonl_file}: {e}")
-
-        return results
-
-    def _search_semantic(
-        self, jsonl_file: Path, query: str, speaker_filter: Optional[str]
-    ) -> List[SearchResult]:
-        """
-        Semantic search using spaCy NLP.
-
-        Finds conceptually similar content even without exact matches.
-        """
-        if not self.nlp:
-            return []
-
-        results = []
-        conversation_id = jsonl_file.stem
-
-        # Process query with spaCy
-        query_doc = self.nlp(query.lower())
-        query_tokens = [
-            token for token in query_doc if not token.is_stop and token.is_alpha
-        ]
-
-        try:
-            with open(jsonl_file, "r", encoding="utf-8") as f:
-                line_num = 0
-                for line in f:
-                    line_num += 1
-                    try:
-                        entry = json.loads(line.strip())
-
-                        if entry.get("type") in ["user", "assistant"]:
-                            speaker = (
-                                "human" if entry["type"] == "user" else "assistant"
-                            )
-
-                            if speaker_filter and speaker != speaker_filter:
-                                continue
-
-                            content = self._extract_content(entry)
-                            if not content:
-                                continue
-
-                            # Process content with spaCy
-                            content_doc = self.nlp(content.lower())
-
-                            # Calculate semantic similarity
-                            similarity = self._calculate_semantic_similarity(
-                                query_doc, query_tokens, content_doc
-                            )
-
-                            if similarity > 0.3:  # Threshold for semantic matches
-                                context = self._extract_context(content, query, False)
-
-                                # Parse timestamp if present
-                                timestamp = None
-                                timestamp_str = entry.get("timestamp")
-                                if timestamp_str:
-                                    try:
-                                        timestamp = datetime.fromisoformat(
-                                            timestamp_str.replace("Z", "+00:00")
-                                        )
-                                    except ValueError:
-                                        pass
-
-                                result = SearchResult(
-                                    file_path=jsonl_file,
-                                    conversation_id=conversation_id,
-                                    matched_content=content[:200],
-                                    context=context,
-                                    speaker=speaker,
-                                    timestamp=timestamp,
-                                    relevance_score=similarity,
-                                    line_number=line_num,
-                                )
-                                results.append(result)
-
-                    except json.JSONDecodeError:
-                        continue
-
-        except Exception as e:
-            print(f"Error searching {jsonl_file}: {e}")
+        except Exception:
+            pass
 
         return results
 
     def _extract_content(self, entry: Dict) -> str:
         """Extract text content from a JSONL entry."""
-        # Handle test format (type: user/assistant, content: string)
-        if entry.get("type") in ["user", "assistant"] and "content" in entry:
-            content = entry["content"]
-            if isinstance(content, str):
-                return content
-
-        # Handle actual Claude log format (type: user/assistant, message: {...})
         if "message" in entry:
             msg = entry["message"]
             if isinstance(msg, dict):
                 content = msg.get("content", "")
 
-                # Handle different content formats
                 if isinstance(content, list):
-                    # Extract text from content array
                     text_parts = []
                     for item in content:
                         if isinstance(item, dict) and item.get("type") == "text":
@@ -582,18 +539,9 @@ class ConversationSearcher:
     def _calculate_relevance(
         self, content: str, query: str, query_tokens: Set[str], case_sensitive: bool
     ) -> float:
-        """
-        Calculate relevance score for content against query.
-
-        Uses multiple factors:
-        - Exact match bonus
-        - Token overlap
-        - Proximity of terms
-        - Match density
-        """
+        """Calculate relevance score for content against query."""
         relevance = 0.0
 
-        # Prepare content
         if not case_sensitive:
             content_lower = content.lower()
             query_lower = query.lower()
@@ -604,7 +552,6 @@ class ConversationSearcher:
         # Exact match bonus
         if query_lower in content_lower:
             relevance += 0.5
-            # Additional bonus for multiple occurrences
             count = content_lower.count(query_lower)
             relevance += min(0.3, count * 0.1)
 
@@ -614,226 +561,40 @@ class ConversationSearcher:
             overlap = len(query_tokens & content_tokens)
             relevance += min(0.4, overlap / len(query_tokens) * 0.4)
 
-        # Proximity bonus - are query terms near each other?
-        if len(query_tokens) > 1:
-            # Check if all query tokens appear within a window
-            words = content_lower.split()
-            for i in range(len(words) - len(query_tokens)):
-                window = set(words[i : i + len(query_tokens) * 2])
-                if query_tokens.issubset(window):
-                    relevance += 0.1
-                    break
-
         return min(1.0, relevance)
 
-    def _calculate_semantic_similarity(
-        self, query_doc, query_tokens, content_doc
-    ) -> float:
-        """Calculate semantic similarity using spaCy."""
-        if not query_tokens:
-            return 0.0
-
-        # Find semantically similar tokens
-        similar_count = 0
-        for query_token in query_tokens:
-            for content_token in content_doc:
-                if content_token.is_alpha and not content_token.is_stop:
-                    # Check if tokens are similar (same lemma or high similarity)
-                    if (
-                        query_token.lemma_ == content_token.lemma_
-                        or query_token.text == content_token.text
-                    ):
-                        similar_count += 1
-                        break
-
-        # Calculate similarity score
-        if query_tokens:
-            base_similarity = similar_count / len(query_tokens)
-        else:
-            base_similarity = 0.0
-
-        # Boost for exact phrase matches
-        if query_doc.text.lower() in content_doc.text.lower():
-            base_similarity = min(1.0, base_similarity + 0.3)
-
-        return base_similarity
-
     def _extract_context(
-        self, content: str, query: str, case_sensitive: bool, context_size: int = 150
+        self, content: str, query: str, case_sensitive: bool, context_size: int = 300
     ) -> str:
         """Extract context around the match for display."""
         if not case_sensitive:
-            # Find match position
             pos = content.lower().find(query.lower())
         else:
             pos = content.find(query)
 
         if pos == -1:
             # No exact match, return beginning of content
-            return content[: context_size * 2] + (
-                "..." if len(content) > context_size * 2 else ""
-            )
+            return content[:context_size] + ("..." if len(content) > context_size else "")
 
         # Extract context around match
-        start = max(0, pos - context_size)
-        end = min(len(content), pos + len(query) + context_size)
+        half_context = context_size // 2
+        start = max(0, pos - half_context)
+        end = min(len(content), pos + len(query) + half_context)
 
         context = content[start:end]
 
-        # Add ellipsis if truncated
         if start > 0:
             context = "..." + context
         if end < len(content):
             context = context + "..."
 
-        # Highlight the match
-        if not case_sensitive:
-            # Case-insensitive replacement
-            pattern = re.compile(re.escape(query), re.IGNORECASE)
-            context = pattern.sub(f"**{query.upper()}**", context)
-        else:
-            context = context.replace(query, f"**{query}**")
-
         return context
 
-    def search_by_date_range(
-        self, date_from: datetime, date_to: datetime, search_dir: Optional[Path] = None
-    ) -> List[Path]:
-        """Find all conversation files within a date range."""
-        if search_dir is None:
-            search_dir = Path.home() / ".claude" / "projects"
-
-        jsonl_files = list(search_dir.rglob("*.jsonl"))
-        return self._filter_files_by_date(jsonl_files, date_from, date_to)
-
-    def get_conversation_topics(
-        self, jsonl_file: Path, max_topics: int = 5
-    ) -> List[str]:
-        """
-        Extract main topics from a conversation.
-
-        Uses NLP to identify key themes and subjects.
-        """
-        if not self.nlp:
-            return []
-
-        # Collect all content
-        all_content = []
+    def _parse_timestamp(self, timestamp_str: Optional[str]) -> Optional[datetime]:
+        """Parse ISO timestamp string to datetime."""
+        if not timestamp_str:
+            return None
         try:
-            with open(jsonl_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line.strip())
-                        content = self._extract_content(entry)
-                        if content:
-                            all_content.append(content)
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            return []
-
-        if not all_content:
-            return []
-
-        # Process with spaCy
-        full_text = " ".join(all_content[:10])  # Limit to avoid processing too much
-        doc = self.nlp(full_text)
-
-        # Extract noun phrases as topics
-        noun_phrases = []
-        for chunk in doc.noun_chunks:
-            if len(chunk.text.split()) <= 3:  # Reasonable length
-                noun_phrases.append(chunk.text.lower())
-
-        # Count frequency
-        phrase_counts = {}
-        for phrase in noun_phrases:
-            phrase_counts[phrase] = phrase_counts.get(phrase, 0) + 1
-
-        # Sort by frequency
-        sorted_phrases = sorted(phrase_counts.items(), key=lambda x: x[1], reverse=True)
-
-        # Return top topics
-        return [phrase for phrase, count in sorted_phrases[:max_topics] if count > 1]
-
-
-def create_search_index(search_dir: Path, output_file: Path) -> None:
-    """
-    Create a search index for faster subsequent searches.
-
-    This pre-processes all conversations and saves metadata.
-    """
-    index = {"created": datetime.now().isoformat(), "conversations": {}}
-
-    jsonl_files = list(search_dir.rglob("*.jsonl"))
-
-    for jsonl_file in jsonl_files:
-        conv_id = jsonl_file.stem
-
-        # Extract metadata
-        metadata = {
-            "path": str(jsonl_file),
-            "modified": datetime.fromtimestamp(jsonl_file.stat().st_mtime).isoformat(),
-            "size": jsonl_file.stat().st_size,
-            "message_count": 0,
-            "speakers": set(),
-            "first_message": None,
-            "last_message": None,
-        }
-
-        # Parse file
-        try:
-            with open(jsonl_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line.strip())
-                        if entry.get("type") in ["user", "assistant"]:
-                            metadata["message_count"] += 1
-                            speaker = (
-                                "human" if entry["type"] == "user" else "assistant"
-                            )
-                            metadata["speakers"].add(speaker)
-
-                            if metadata["first_message"] is None:
-                                metadata["first_message"] = entry.get("timestamp")
-                            metadata["last_message"] = entry.get("timestamp")
-
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            continue
-
-        # Convert set to list for JSON serialization
-        metadata["speakers"] = list(metadata["speakers"])
-
-        index["conversations"][conv_id] = metadata
-
-    # Save index
-    with open(output_file, "w") as f:
-        json.dump(index, f, indent=2)
-
-    print(f"Created search index with {len(index['conversations'])} conversations")
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Test the search functionality
-    searcher = ConversationSearcher()
-
-    # Example searches
-    print("Testing search functionality...")
-
-    # Smart search
-    results = searcher.search("python error", mode="smart", max_results=5)
-    print(f"\nFound {len(results)} results for 'python error'")
-    for result in results[:2]:
-        print(result)
-
-    # Regex search
-    results = searcher.search(r"import\s+\w+", mode="regex", max_results=5)
-    print(f"\nFound {len(results)} results for regex 'import\\s+\\w+'")
-
-    # Date range search
-    week_ago = datetime.now() - timedelta(days=7)
-    results = searcher.search("", date_from=week_ago, max_results=5)
-    print(f"\nFound {len(results)} conversations from the last week")
+            return datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        except ValueError:
+            return None

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-conversation-extractor"
-version = "1.1.2"
-description = "Export Claude Code conversations from ~/.claude/projects. Extract, search, and backup Claude chat history to markdown files."
+version = "2.0.0"
+description = "Non-interactive CLI tool for searching and exporting Claude Code conversations. Designed for scripting and Claude Code plugin integration."
 readme = "README.md"
 authors = [
     {name = "Dustin Kirby"}
@@ -43,10 +43,11 @@ requires-python = ">=3.8"
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/ZeroSumQuant/claude-conversation-extractor"
-Documentation = "https://github.com/ZeroSumQuant/claude-conversation-extractor#readme"
-Repository = "https://github.com/ZeroSumQuant/claude-conversation-extractor"
-Issues = "https://github.com/ZeroSumQuant/claude-conversation-extractor/issues"
+Homepage = "https://github.com/victor-software-house/claude-conversation-extractor"
+Documentation = "https://github.com/victor-software-house/claude-conversation-extractor#readme"
+Repository = "https://github.com/victor-software-house/claude-conversation-extractor"
+Issues = "https://github.com/victor-software-house/claude-conversation-extractor/issues"
+Upstream = "https://github.com/ZeroSumQuant/claude-conversation-extractor"
 
 [project.scripts]
 claude-extract = "extract_claude_logs:launch_interactive"
